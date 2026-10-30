@@ -158,3 +158,80 @@ sequenceDiagram
 | **Role-Based Access Control** | Header-simulated roles (`viewer`, `customer`, `sales_rep`, `manager`). | Approvals strictly require `manager`; finalization requires `sales_rep` or `manager`. |
 | **Concurrency & Idempotency** | Prevents duplicate requests or quotes on network retry. | Deterministic hash keys (`idempotency_key`); finalization revalidates stock and pricing to prevent race conditions. |
 
+---
+
+## 5. Multi-Agent System & Phase-by-Phase Execution
+
+BuildMate AI features **3 specialized agents** coordinated by the explicit state machine, ensuring autonomous reasoning with deterministic financial and inventory guardrails.
+
+```mermaid
+flowchart LR
+    A["Phase 1<br><b>Sales Intelligence</b><br>(SalesAgent)"] --> B["Phase 2<br><b>Inventory & Fulfillment</b><br>(InventoryAgent)"]
+    B --> C["Phase 3<br><b>Commercial & Quote</b><br>(CommercialAgent)"]
+    C --> D["Phase 4<br><b>Approval & Finalization</b><br>(Human + Services)"]
+```
+
+### Agent Specification Matrix
+
+| Agent | Active Workflow State | Input Data | Output / Responsibilities | Deterministic Guardrails |
+| :--- | :--- | :--- | :--- | :--- |
+| **1. Sales Intelligence Agent** (`SalesAgent`) | `VALIDATING_REQUEST` | Raw freeform request text, customer ID, current date | • Extracts structured line items, quantities, delivery deadline, and location.<br>• Identifies requested discounts.<br>• Formulates clarification questions if details or SKUs are ambiguous. | Pydantic schema validation (`ParsedRequest`). Checks that customer and all line-item SKUs exist in database catalog. |
+| **2. Inventory & Fulfillment Agent** (`InventoryAgent`) | `CHECKING_INVENTORY` | Verified line items, deadline date, inventory policy | • Calculates net stock (`on_hand - reserved`).<br>• Identifies shortages.<br>• Evaluates 4 fulfillment strategies (Partial, Substitute, Delayed, Manual Review).<br>• Scores options with weighted ranking. | Validates against `FulfillmentResult`. Cross-checks agent's reported stock against live database inventory. Hallucinated stock numbers trigger an exception. |
+| **3. Commercial & Pricing Agent** (`CommercialAgent`) | `PREPARING_QUOTE` | Chosen fulfillment lines, catalog prices, discount policy | • Resolves final line quantities based on customer decision.<br>• Looks up price book rates.<br>• Computes subtotal, discounts, and total price.<br>• Checks discount authorization policy. | Validates against `QuoteDraft`. Exact decimal arithmetic (`ROUND_HALF_UP`) re-calculated deterministically by `services.py`. Price changes or unapproved totals are rejected. |
+
+---
+
+### Detailed Phase-by-Phase Walkthrough
+
+#### Phase 1: Intake & Sales Intelligence (`VALIDATING_REQUEST`)
+* **Agent:** `SalesAgent` (`MockSalesAgent` or `LLMSalesAgent` via `ModelAdapter`).
+* **Trigger:** Customer or sales rep submits freeform text.
+* **Process:**
+  1. Identifies customer account from text or input parameters.
+  2. Parses product mentions and queries catalog keywords (`find_products`).
+  3. Parses deadlines (e.g., relative dates like *"by Friday"* converted to ISO format using current date).
+  4. Checks for ambiguities (e.g. "drywall" matching multiple sheet sizes).
+* **Transitions:**
+  * **Ambiguities / Missing details:** Transitions to **`NEEDS_CLARIFICATION`** (customer must answer clarifying questions).
+  * **Complete & verified:** Transitions to **`CHECKING_INVENTORY`**.
+
+#### Phase 2: Inventory & Fulfillment (`CHECKING_INVENTORY`)
+* **Agent:** `InventoryAgent` (`MockInventoryAgent`).
+* **Trigger:** Verified `ParsedRequest` provided by coordinator.
+* **Process:**
+  1. Computes live net stock: $\text{Available} = \text{On-Hand} - \text{Reserved}$.
+  2. Calculates shortage: $\text{Shortage} = \max(0, \text{Requested} - \text{Available})$.
+  3. Formulates up to **4 fulfillment options**:
+     * **`PARTIAL`**: Ship available stock now by deadline.
+     * **`SUBSTITUTE`**: Find compatible items (`approved=True` in `compatibility` table, e.g. heavy-gauge stud).
+     * **`DELAYED`**: Source from supplier lead-time (marked `UNKNOWN` and unselectable if lead time is missing).
+     * **`MANUAL_REVIEW`**: Escalate to dispatcher.
+  4. Scores options using a 40/30/20/10 weighted model (Margin, Fulfillment Speed, Supplier Reliability, Customer Convenience).
+* **Transitions:**
+  * **All items available:** Advances directly to **`PREPARING_QUOTE`**.
+  * **Shortage with feasible options:** Transitions to **`CUSTOMER_DECISION_REQUIRED`** (customer chooses in UI).
+  * **No feasible options / complex shortage:** Transitions to **`NEEDS_HUMAN_REVIEW`**.
+
+#### Phase 3: Commercial & Quote (`PREPARING_QUOTE`)
+* **Agent:** `CommercialAgent` (`MockCommercialAgent`).
+* **Trigger:** Stock confirmed or customer selected fulfillment options.
+* **Process:**
+  1. Resolves item quantities (original vs substitute SKUs).
+  2. Looks up unit prices from active price books.
+  3. Applies discount policy (`DEFAULT_POLICY`):
+     * $\le 5\%$ discount: Within sales rep authority $\rightarrow$ **Auto-approved**.
+     * $> 5\%$ discount: Exceeds standard authority $\rightarrow$ **Requires Manager Approval**.
+     * Exceeds customer limit $\rightarrow$ **Rejected**.
+* **Transitions:**
+  * **Within policy ($\le 5\%$):** Transitions directly to **`APPROVED`**.
+  * **Requires manager approval ($> 5\%$):** Creates an `Approval` record and transitions to **`PENDING_APPROVAL`**.
+
+#### Phase 4: Human-in-the-Loop & Finalization (`APPROVED` $\rightarrow$ `COMPLETED`)
+* **Agents:** **None** — this phase is strictly human roles and deterministic code.
+* **Process:**
+  1. **Manager Approval:** A user with `X-Role: manager` resolves pending approvals (`APPROVE` or `REJECT`).
+  2. **Finalization (`finalize`):** A `sales_rep` or `manager` triggers finalization.
+  3. **Concurrency & Drift Check:** Runs `validate_finalization()` to re-verify stock availability and price book rates, preventing race conditions.
+  4. **Stock Reservation:** Locks inventory (`inv.reserved += quantity`), sets quote to `FINAL`, and transitions state to **`COMPLETED`**.
+
+
