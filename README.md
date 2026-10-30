@@ -23,6 +23,8 @@ cd frontend && npm run build && npm test   # type-check + build + formatting uni
 4. Click **Finalize** (revalidates inventory/prices, reserves stock) → COMPLETED. Audit history shows every step.
 
 ## Architecture (`backend/app`)
+> **Detailed Diagrams & Specification:** See [ARCHITECTURE.md](ARCHITECTURE.md) for full interactive Mermaid architecture flowcharts, state machine diagrams, and agent verification sequence models.
+
 - `models.py` SQLAlchemy models; money stored as strings, handled as `Decimal` (`ROUND_HALF_UP`, cents).
 - `services.py` deterministic services: lookup, availability (on-hand − reserved), shortage, approved-only compatibility, delivery feasibility, option evaluation (weights 40/30/20/10; INFEASIBLE hard-excluded; missing data ⇒ UNKNOWN), pricing, quote math, discount authorization (`DEFAULT_POLICY`, configurable via `create_app(policy=…)`), finalization validation, idempotency keys.
 - `agents.py` three agent interfaces, deterministic mocks, and a provider-neutral `ModelAdapter` / `LLMSalesAgent` example.
