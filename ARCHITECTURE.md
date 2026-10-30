@@ -157,3 +157,4 @@ sequenceDiagram
 | **Full Audit Trail** | Tracks every state change, actor, and payload into `audit_events`. | Complete traceability for every decision, rejection, and authorization. |
 | **Role-Based Access Control** | Header-simulated roles (`viewer`, `customer`, `sales_rep`, `manager`). | Approvals strictly require `manager`; finalization requires `sales_rep` or `manager`. |
 | **Concurrency & Idempotency** | Prevents duplicate requests or quotes on network retry. | Deterministic hash keys (`idempotency_key`); finalization revalidates stock and pricing to prevent race conditions. |
+
